@@ -21,14 +21,14 @@ import { MarketGuide } from './guide';
 import { convertScriptType } from '@/utils/request-addess';
 import { parseExternalBtcAmount } from '@/api/coins';
 import { FirmwareUpgradeRequiredDialog } from '@/components/dialog/firmware-upgrade-required-dialog';
+import { useMarketIframeActive } from '@/hooks/vendor-iframe-active';
+import { useVendorIframeResizeHeight } from '@/hooks/vendor-iframe-resize-height';
+import { useVendorTerms } from '@/hooks/vendor-iframe-terms';
 import {
   getVendorIframeMessageTarget,
   postMessageToVendorIframe,
-  useMarketIframeActive,
-  useVendorIframeResizeHeight,
-  useVendorTerms,
   type TVendorIframeMessageTarget,
-} from '@/hooks/vendor-iframe';
+} from '@/hooks/vendor-iframe-message';
 import { useAccountSynced } from '@/hooks/account';
 import { Message } from '@/components/message/message';
 import style from './iframe.module.css';
