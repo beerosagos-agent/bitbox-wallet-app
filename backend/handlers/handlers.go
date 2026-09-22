@@ -1647,6 +1647,7 @@ func (handlers *Handlers) getMarketBitrefillInfo(r *http.Request) interface{} {
 		Success      bool    `json:"success"`
 		ErrorMessage string  `json:"errorMessage,omitempty"`
 		Url          string  `json:"url"`
+		WidgetURL    string  `json:"widgetUrl"`
 		Ref          string  `json:"ref"`
 		Address      *string `json:"address"`
 	}
@@ -1665,10 +1666,11 @@ func (handlers *Handlers) getMarketBitrefillInfo(r *http.Request) interface{} {
 	}
 
 	return result{
-		Success: true,
-		Url:     bitrefillInfo.Url,
-		Ref:     bitrefillInfo.Ref,
-		Address: bitrefillInfo.Address,
+		Success:   true,
+		Url:       bitrefillInfo.Url,
+		WidgetURL: bitrefillInfo.WidgetURL,
+		Ref:       bitrefillInfo.Ref,
+		Address:   bitrefillInfo.Address,
 	}
 }
 
