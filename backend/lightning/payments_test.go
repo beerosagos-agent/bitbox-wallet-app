@@ -2184,6 +2184,176 @@ func TestSendBitcoinPayment(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// A lost send response must be reconciled by the original key even when the payment
+// spent the balance. Retrying either amount mode must not prepare or send again.
+func TestSendBitcoinPaymentReconcilesRetryAfterBalanceSpent(t *testing.T) {
+	t.Parallel()
+	for _, sendAll := range []bool{false, true} {
+		for _, status := range []breez_sdk_spark.PaymentStatus{breez_sdk_spark.PaymentStatusPending, breez_sdk_spark.PaymentStatusCompleted} {
+			t.Run(fmt.Sprintf("sendAll=%t/status=%d", sendAll, status), func(t *testing.T) {
+				t.Parallel()
+				const idempotencyKey = "00000000-0000-4000-8000-000000000001"
+				amountSat := uint64(9_000)
+				if sendAll {
+					amountSat = 10_000
+				}
+				var sent bool
+				responseLost := errors.New("response lost")
+				details := breez_sdk_spark.PaymentDetails(breez_sdk_spark.PaymentDetailsWithdraw{TxId: "tx-id"})
+				payment := breez_sdk_spark.Payment{Id: idempotencyKey, Status: status, Details: &details}
+				sdk := &testPaymentSDK{balanceSats: 10_000}
+				sdk.getPayment = func(request breez_sdk_spark.GetPaymentRequest) (breez_sdk_spark.GetPaymentResponse, error) {
+					require.Equal(t, idempotencyKey, request.PaymentId)
+					if !sent {
+						return breez_sdk_spark.GetPaymentResponse{}, breez_sdk_spark.NewSdkErrorInvalidInput("Not found")
+					}
+					return breez_sdk_spark.GetPaymentResponse{Payment: payment}, nil
+				}
+				sdk.prepareSend = func(request breez_sdk_spark.PrepareSendPaymentRequest) (breez_sdk_spark.PrepareSendPaymentResponse, error) {
+					require.False(t, sent, "retry must not prepare another withdrawal")
+					response := testStandardBitcoinPrepareResponse(amountSat, 1_000)
+					response.FeePolicy = *request.FeePolicy
+					return response, nil
+				}
+				sdk.send = func(request breez_sdk_spark.SendPaymentRequest) (breez_sdk_spark.SendPaymentResponse, error) {
+					require.False(t, sent, "retry must not send another withdrawal")
+					require.Equal(t, idempotencyKey, *request.IdempotencyKey)
+					sent = true
+					sdk.balanceSats = 0
+					return breez_sdk_spark.SendPaymentResponse{}, responseLost
+				}
+				lightning := newActivePaymentTestLightning(t, sdk)
+				request := sendPaymentRequest{
+					Type:           paymentInputTypeBitcoinAddress,
+					PaymentInput:   testP2WPKHAddress,
+					AmountSat:      &amountSat,
+					SendAll:        sendAll,
+					ApprovedFeeSat: 1_000,
+					IdempotencyKey: idempotencyKey,
+				}
+
+				require.ErrorIs(t, lightning.SendPayment(request), responseLost)
+				require.NoError(t, lightning.SendPayment(request))
+				require.NotNil(t, lightning.Account())
+				require.False(t, sdk.disconnectCalled)
+				require.False(t, sdk.destroyCalled)
+			})
+		}
+	}
+}
+
+// Existing failed or unknown payment states must not be reported as a successful
+// retry or trigger a new withdrawal with the same key.
+func TestSendBitcoinPaymentRejectsUnsuccessfulExistingPayment(t *testing.T) {
+	t.Parallel()
+	for _, status := range []breez_sdk_spark.PaymentStatus{breez_sdk_spark.PaymentStatusFailed, 0} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			t.Parallel()
+			sdk := &testPaymentSDK{
+				balanceSats: 10_000,
+				getPayment: func(breez_sdk_spark.GetPaymentRequest) (breez_sdk_spark.GetPaymentResponse, error) {
+					return breez_sdk_spark.GetPaymentResponse{Payment: breez_sdk_spark.Payment{Status: status}}, nil
+				},
+				prepareSend: func(breez_sdk_spark.PrepareSendPaymentRequest) (breez_sdk_spark.PrepareSendPaymentResponse, error) {
+					t.Fatal("an existing payment must not prepare another withdrawal")
+					return breez_sdk_spark.PrepareSendPaymentResponse{}, nil
+				},
+			}
+			lightning := newActivePaymentTestLightning(t, sdk)
+			amountSat := uint64(5_000)
+			err := lightning.SendPayment(sendPaymentRequest{
+				Type:           paymentInputTypeBitcoinAddress,
+				PaymentInput:   testP2WPKHAddress,
+				AmountSat:      &amountSat,
+				ApprovedFeeSat: 1_000,
+				IdempotencyKey: "00000000-0000-4000-8000-000000000001",
+			})
+
+			require.Error(t, err)
+			if status == breez_sdk_spark.PaymentStatusFailed {
+				require.ErrorIs(t, err, errLightningWithdrawalFailed)
+			}
+		})
+	}
+}
+
+// Only the SDK's two explicit not-found errors allow a new send. Other lookup
+// failures, including similar error messages, must stop before preparation.
+func TestSendBitcoinPaymentHandlesLookupErrors(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name      string
+		lookupErr error
+		notFound  bool
+	}{
+		{"sdk not found", breez_sdk_spark.NewSdkErrorInvalidInput("Not found"), true},
+		{"sqlite not found", breez_sdk_spark.NewSdkErrorStorageError("Underlying implementation error: Query returned no rows"), true},
+		{"storage unavailable", breez_sdk_spark.NewSdkErrorStorageError("unavailable"), false},
+		{"unexpected invalid input", breez_sdk_spark.NewSdkErrorInvalidInput("unexpected error"), false},
+		{"wrong error type", breez_sdk_spark.NewSdkErrorInvalidInput("Underlying implementation error: Query returned no rows"), false},
+		{"untyped error", errors.New("Underlying implementation error: Query returned no rows"), false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			sendCalls := 0
+			sdk := &testPaymentSDK{
+				balanceSats: 10_000,
+				getPayment: func(breez_sdk_spark.GetPaymentRequest) (breez_sdk_spark.GetPaymentResponse, error) {
+					return breez_sdk_spark.GetPaymentResponse{}, testCase.lookupErr
+				},
+				prepareSend: func(breez_sdk_spark.PrepareSendPaymentRequest) (breez_sdk_spark.PrepareSendPaymentResponse, error) {
+					require.True(t, testCase.notFound, "lookup errors must not prepare another withdrawal")
+					return testStandardBitcoinPrepareResponse(5_000, 1_000), nil
+				},
+				send: func(breez_sdk_spark.SendPaymentRequest) (breez_sdk_spark.SendPaymentResponse, error) {
+					sendCalls++
+					return breez_sdk_spark.SendPaymentResponse{}, nil
+				},
+			}
+			lightning := newActivePaymentTestLightning(t, sdk)
+			amountSat := uint64(5_000)
+			err := lightning.SendPayment(sendPaymentRequest{
+				Type:           paymentInputTypeBitcoinAddress,
+				PaymentInput:   testP2WPKHAddress,
+				AmountSat:      &amountSat,
+				ApprovedFeeSat: 1_000,
+				IdempotencyKey: "00000000-0000-4000-8000-000000000001",
+			})
+
+			if testCase.notFound {
+				require.NoError(t, err)
+				require.Equal(t, 1, sendCalls)
+			} else {
+				require.ErrorIs(t, err, testCase.lookupErr)
+				require.Zero(t, sendCalls)
+			}
+		})
+	}
+}
+
+// Reconciliation must not access the SDK before it is ready.
+func TestSendBitcoinPaymentRequiresActiveSDK(t *testing.T) {
+	t.Parallel()
+	sdk := &testPaymentSDK{
+		getPayment: func(breez_sdk_spark.GetPaymentRequest) (breez_sdk_spark.GetPaymentResponse, error) {
+			t.Fatal("an inactive SDK must not be queried")
+			return breez_sdk_spark.GetPaymentResponse{}, nil
+		},
+	}
+	lightning := newActivePaymentTestLightning(t, sdk)
+	lightning.setSDKStatus(SDKStatusInactive)
+	amountSat := uint64(5_000)
+	err := lightning.SendPayment(sendPaymentRequest{
+		Type:           paymentInputTypeBitcoinAddress,
+		PaymentInput:   testP2WPKHAddress,
+		AmountSat:      &amountSat,
+		ApprovedFeeSat: 1_000,
+		IdempotencyKey: "00000000-0000-4000-8000-000000000001",
+	})
+
+	require.ErrorContains(t, err, "Lightning not initialized")
+}
+
 func TestSendBitcoinPaymentRejectsBelowMinimum(t *testing.T) {
 	t.Parallel()
 

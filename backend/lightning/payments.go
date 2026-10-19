@@ -847,12 +847,52 @@ func (lightning *Lightning) SendPayment(request sendPaymentRequest) error {
 	}
 }
 
+// lookupPayment returns nil when the SDK has no payment with this idempotency key.
+func (lightning *Lightning) lookupPayment(idempotencyKey string) (*breez_sdk_spark.Payment, error) {
+	response, err := lightning.sdkService.GetPayment(breez_sdk_spark.GetPaymentRequest{
+		PaymentId: idempotencyKey,
+	})
+	if err == nil {
+		return &response.Payment, nil
+	}
+	// SQLite reports a missing payment as a StorageError with "Query returned no rows";
+	// an explicit SDK NotFound maps to InvalidInput("Not found"). Only accept these
+	// exact errors so a failed lookup cannot trigger another withdrawal.
+	var invalidInput *breez_sdk_spark.SdkErrorInvalidInput
+	var storageError *breez_sdk_spark.SdkErrorStorageError
+	notFound := errors.As(err, &invalidInput) && invalidInput.Field0 == "Not found" ||
+		errors.As(err, &storageError) && storageError.Field0 == "Underlying implementation error: Query returned no rows"
+	if notFound {
+		return nil, nil
+	}
+	return nil, lightningPaymentError(err)
+}
+
 func (lightning *Lightning) sendBitcoinPayment(request sendPaymentRequest) error {
 	if request.AmountSat == nil || *request.AmountSat == 0 {
 		return errLightningInvalidAmount
 	}
 	if request.IdempotencyKey == "" {
 		return errp.WithMessage(errLightningInvalidPaymentInput, "idempotency key missing")
+	}
+	if err := lightning.CheckActive(); err != nil {
+		return err
+	}
+	// A previous send may have spent the balance despite losing its response.
+	// Reconcile that attempt before preparing a payment with the remaining funds.
+	payment, err := lightning.lookupPayment(request.IdempotencyKey)
+	if err != nil {
+		return err
+	}
+	if payment != nil {
+		switch payment.Status {
+		case breez_sdk_spark.PaymentStatusPending, breez_sdk_spark.PaymentStatusCompleted:
+			return nil
+		case breez_sdk_spark.PaymentStatusFailed:
+			return errLightningWithdrawalFailed
+		default:
+			return errp.Newf("unexpected Bitcoin withdrawal status: %d", payment.Status)
+		}
 	}
 
 	prepareResponse, fee, err := lightning.prepareBitcoinPayment(
@@ -1200,21 +1240,12 @@ func (lightning *Lightning) CloseWithdraw(
 	}
 	// A previous send may have spent the balance already. Reconcile its result before
 	// checking the balance or preparing a new withdrawal with spendable leaves.
-	payment, err := lightning.sdkService.GetPayment(breez_sdk_spark.GetPaymentRequest{
-		PaymentId: idempotencyKey,
-	})
-	if err == nil {
-		return lightning.closeWithdrawPaymentResult(payment.Payment)
+	payment, err := lightning.lookupPayment(idempotencyKey)
+	if err != nil {
+		return nil, err
 	}
-	// SQLite reports a missing payment as a StorageError with "Query returned no rows";
-	// an explicit SDK NotFound maps to InvalidInput("Not found"). Only accept these
-	// exact errors so a failed lookup cannot trigger another withdrawal.
-	var invalidInput *breez_sdk_spark.SdkErrorInvalidInput
-	var storageError *breez_sdk_spark.SdkErrorStorageError
-	notFound := errors.As(err, &invalidInput) && invalidInput.Field0 == "Not found" ||
-		errors.As(err, &storageError) && storageError.Field0 == "Underlying implementation error: Query returned no rows"
-	if !notFound {
-		return nil, lightningPaymentError(err)
+	if payment != nil {
+		return lightning.closeWithdrawPaymentResult(*payment)
 	}
 	availableBalance, err := lightning.availableBalance()
 	if err != nil {
