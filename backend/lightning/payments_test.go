@@ -1156,6 +1156,7 @@ func TestPrepareLNURLPayRequest(t *testing.T) {
 	require.Equal(t, payRequest, request.PayRequest)
 }
 
+// BOLT11 quotes expose the recipient amount for either SDK fee policy.
 func TestPreparedBolt11PaymentFee(t *testing.T) {
 	t.Parallel()
 
@@ -1178,6 +1179,15 @@ func TestPreparedBolt11PaymentFee(t *testing.T) {
 				FeeSat:        7,
 				TotalDebitSat: 130,
 			},
+		},
+		{
+			name: "bolt11 invoice with fees included",
+			response: breez_sdk_spark.PrepareSendPaymentResponse{
+				PaymentMethod: breez_sdk_spark.SendPaymentMethodBolt11Invoice{LightningFeeSats: 7},
+				Amount:        big.NewInt(123),
+				FeePolicy:     breez_sdk_spark.FeePolicyFeesIncluded,
+			},
+			expected: &paymentFee{AmountSat: 116, FeeSat: 7, TotalDebitSat: 123},
 		},
 		{
 			name: "unsupported payment method",
@@ -1209,19 +1219,27 @@ func TestPreparedBolt11PaymentFee(t *testing.T) {
 	}
 }
 
+// LNURL quotes keep recipient amounts separate from the total debit under both fee policies.
 func TestPreparedLNURLPayFee(t *testing.T) {
 	t.Parallel()
 
-	fee := preparedLNURLPayFee(breez_sdk_spark.PrepareLnurlPayResponse{
-		AmountSats: 123,
-		FeeSats:    7,
-	})
-
-	require.Equal(t, &paymentFee{
-		AmountSat:     123,
-		FeeSat:        7,
-		TotalDebitSat: 130,
-	}, fee)
+	for _, testCase := range []struct {
+		feePolicy breez_sdk_spark.FeePolicy
+		expected  paymentFee
+	}{
+		{breez_sdk_spark.FeePolicyFeesExcluded, paymentFee{AmountSat: 123, FeeSat: 7, TotalDebitSat: 130}},
+		{breez_sdk_spark.FeePolicyFeesIncluded, paymentFee{AmountSat: 116, FeeSat: 7, TotalDebitSat: 123}},
+	} {
+		t.Run(fmt.Sprint(testCase.feePolicy), func(t *testing.T) {
+			t.Parallel()
+			fee := preparedLNURLPayFee(breez_sdk_spark.PrepareLnurlPayResponse{
+				AmountSats: 123,
+				FeeSats:    7,
+				FeePolicy:  testCase.feePolicy,
+			})
+			require.Equal(t, &testCase.expected, fee)
+		})
+	}
 }
 
 func TestPrepareBitcoinPaymentRequest(t *testing.T) {
@@ -1240,6 +1258,7 @@ func TestPrepareBitcoinPaymentRequest(t *testing.T) {
 	require.Equal(t, breez_sdk_spark.FeePolicyFeesIncluded, *request.FeePolicy)
 }
 
+// Bitcoin quotes deduct the fast fee from included-fee budgets exactly once.
 func TestPreparedBitcoinPaymentFee(t *testing.T) {
 	t.Parallel()
 
@@ -1251,19 +1270,22 @@ func TestPreparedBitcoinPaymentFee(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name          string
-		feePolicy     breez_sdk_spark.FeePolicy
-		expectedDebit uint64
+		name           string
+		feePolicy      breez_sdk_spark.FeePolicy
+		expectedAmount uint64
+		expectedDebit  uint64
 	}{
 		{
-			name:          "fees included",
-			feePolicy:     breez_sdk_spark.FeePolicyFeesIncluded,
-			expectedDebit: 10_000,
+			name:           "fees included",
+			feePolicy:      breez_sdk_spark.FeePolicyFeesIncluded,
+			expectedAmount: 9_000,
+			expectedDebit:  10_000,
 		},
 		{
-			name:          "fees excluded",
-			feePolicy:     breez_sdk_spark.FeePolicyFeesExcluded,
-			expectedDebit: 11_000,
+			name:           "fees excluded",
+			feePolicy:      breez_sdk_spark.FeePolicyFeesExcluded,
+			expectedAmount: 10_000,
+			expectedDebit:  11_000,
 		},
 	}
 
@@ -1278,7 +1300,7 @@ func TestPreparedBitcoinPaymentFee(t *testing.T) {
 			})
 
 			require.NoError(t, err)
-			require.Equal(t, uint64(10_000), fee.AmountSat)
+			require.Equal(t, testCase.expectedAmount, fee.AmountSat)
 			require.Equal(t, uint64(1_000), fee.FeeSat)
 			require.Equal(t, testCase.expectedDebit, fee.TotalDebitSat)
 		})
@@ -3118,6 +3140,8 @@ func TestErrorResponseAmountBelowMinimum(t *testing.T) {
 	require.Empty(t, response.ErrorMessage)
 }
 
+// Send all preserves the explicitly reviewed debit through fee approval while
+// keeping the SDK's gross amount separate from the quote's recipient amount.
 func TestSendAllPayment(t *testing.T) {
 	t.Parallel()
 	for _, paymentType := range []string{paymentInputTypeBitcoinAddress, paymentInputTypeBolt11, paymentInputTypeLNURLPay} {
@@ -3191,6 +3215,40 @@ func TestSendAllPayment(t *testing.T) {
 			require.NoError(t, lightning.SendPayment(request))
 			require.Equal(t, 1, sent)
 		})
+	}
+}
+
+// Fees consuming the whole budget must not underflow into a large recipient amount
+// or produce a usable quote for either Lightning payment method.
+func TestSendAllPaymentRejectsFeesConsumingBudget(t *testing.T) {
+	t.Parallel()
+	for _, paymentType := range []string{paymentInputTypeBolt11, paymentInputTypeLNURLPay} {
+		for _, feeSat := range []uint64{1_000, 1_001} {
+			t.Run(fmt.Sprintf("%s/fee=%d", paymentType, feeSat), func(t *testing.T) {
+				t.Parallel()
+				sdk := &testPaymentSDK{
+					balanceSats: 1_000,
+					parseInput: func(string) (breez_sdk_spark.InputType, error) {
+						return breez_sdk_spark.InputTypeLnurlPay{Field0: testLNURLPayDetails()}, nil
+					},
+					prepareSend: func(breez_sdk_spark.PrepareSendPaymentRequest) (breez_sdk_spark.PrepareSendPaymentResponse, error) {
+						return breez_sdk_spark.PrepareSendPaymentResponse{
+							Amount: big.NewInt(1_000), FeePolicy: breez_sdk_spark.FeePolicyFeesIncluded,
+							PaymentMethod: breez_sdk_spark.SendPaymentMethodBolt11Invoice{LightningFeeSats: feeSat},
+						}, nil
+					},
+					prepareLNURLPay: func(breez_sdk_spark.PrepareLnurlPayRequest) (breez_sdk_spark.PrepareLnurlPayResponse, error) {
+						return breez_sdk_spark.PrepareLnurlPayResponse{
+							AmountSats: 1_000, FeeSats: feeSat, FeePolicy: breez_sdk_spark.FeePolicyFeesIncluded,
+						}, nil
+					},
+				}
+				lightning := newActivePaymentTestLightning(t, sdk)
+				quote, err := lightning.PreparePayment(preparePaymentRequest{Type: paymentType, SendAll: true})
+				require.ErrorIs(t, err, errLightningInvalidAmount)
+				require.Nil(t, quote)
+			})
+		}
 	}
 }
 

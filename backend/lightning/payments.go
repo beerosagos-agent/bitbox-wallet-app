@@ -127,6 +127,7 @@ type sendPaymentRequest struct {
 }
 
 type paymentFee struct {
+	// AmountSat is the recipient amount; TotalDebitSat includes the fee.
 	AmountSat      uint64 `json:"amountSat"`
 	FeeSat         uint64 `json:"feeSat"`
 	TotalDebitSat  uint64 `json:"totalDebitSat"`
@@ -630,6 +631,12 @@ func preparedPaymentFee(amountSat, feeSat uint64, feePolicy breez_sdk_spark.FeeP
 	totalDebitSat := amountSat + feeSat
 	if feePolicy == breez_sdk_spark.FeePolicyFeesIncluded {
 		totalDebitSat = amountSat
+		// Clamp invalid outputs to zero so callers can report the appropriate
+		// minimum amount without subtracting unsigned values below zero.
+		amountSat = 0
+		if totalDebitSat > feeSat {
+			amountSat = totalDebitSat - feeSat
+		}
 	}
 	return &paymentFee{
 		AmountSat:     amountSat,
@@ -710,12 +717,8 @@ func (lightning *Lightning) PreparePayment(request preparePaymentRequest) (*paym
 		request.AmountSat = &amountSat
 	}
 	fee, err := lightning.preparePayment(request)
-	if request.SendAll && fee != nil {
-		if fee.FeeSat >= fee.TotalDebitSat {
-			return nil, errLightningInvalidAmount
-		}
-		// The review shows what the recipient gets; the total remains the approved spend budget.
-		fee.AmountSat = fee.TotalDebitSat - fee.FeeSat
+	if request.SendAll && fee != nil && fee.AmountSat == 0 {
+		return nil, errLightningInvalidAmount
 	}
 	return fee, err
 }
@@ -736,7 +739,7 @@ func (lightning *Lightning) preparePayment(request preparePaymentRequest) (*paym
 		}
 		if request.SendAll {
 			if err := lightning.validateBitcoinPaymentAmountAgainstDustLimit(
-				request.PaymentInput, bitcoinPaymentOutputAmountSat(fee, breez_sdk_spark.FeePolicyFeesIncluded),
+				request.PaymentInput, fee.AmountSat,
 			); err != nil {
 				return nil, err
 			}
@@ -905,7 +908,7 @@ func (lightning *Lightning) sendBitcoinPayment(request sendPaymentRequest) error
 	}
 	if err := lightning.validateBitcoinPaymentAmountAgainstDustLimit(
 		request.PaymentInput,
-		bitcoinPaymentOutputAmountSat(fee, prepareResponse.FeePolicy),
+		fee.AmountSat,
 	); err != nil {
 		return err
 	}
@@ -1044,17 +1047,6 @@ func (lightning *Lightning) validateBitcoinPaymentAmountAgainstDustLimit(
 	return nil
 }
 
-func bitcoinPaymentOutputAmountSat(fee *paymentFee, feePolicy breez_sdk_spark.FeePolicy) uint64 {
-	amountSat := fee.AmountSat
-	if feePolicy == breez_sdk_spark.FeePolicyFeesIncluded {
-		if fee.FeeSat >= amountSat {
-			return 0
-		}
-		return amountSat - fee.FeeSat
-	}
-	return amountSat
-}
-
 func (lightning *Lightning) prepareBitcoinPayment(
 	destinationAddress string,
 	amountSat uint64,
@@ -1182,7 +1174,7 @@ func (lightning *Lightning) PrepareCloseWithdraw(
 		return nil, err
 	}
 	amountSat := availableBalance.BigInt().Uint64()
-	prepareResponse, fee, err := lightning.prepareBitcoinPayment(
+	_, fee, err := lightning.prepareBitcoinPayment(
 		destinationAddress,
 		amountSat,
 		breez_sdk_spark.FeePolicyFeesIncluded,
@@ -1198,7 +1190,7 @@ func (lightning *Lightning) PrepareCloseWithdraw(
 	// The SDK checks the cheapest fee during preparation, but closing uses the fast fee.
 	if err := lightning.validateBitcoinPaymentAmountAgainstDustLimit(
 		destinationAddress,
-		bitcoinPaymentOutputAmountSat(fee, prepareResponse.FeePolicy),
+		fee.AmountSat,
 	); err != nil {
 		var amountBelowMinimum *lightningAmountBelowMinimumError
 		if errors.As(err, &amountBelowMinimum) {
@@ -1272,7 +1264,7 @@ func (lightning *Lightning) CloseWithdraw(
 	}
 	if err := lightning.validateBitcoinPaymentAmountAgainstDustLimit(
 		destinationAddress,
-		bitcoinPaymentOutputAmountSat(fee, prepareResponse.FeePolicy),
+		fee.AmountSat,
 	); err != nil {
 		return nil, err
 	}
