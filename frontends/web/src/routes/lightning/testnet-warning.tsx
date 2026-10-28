@@ -50,9 +50,10 @@ const LightningTestnetWarning = ({ onAccept, onCancel }: TWarningProps) => {
 type TProps = {
   active: boolean;
   children: ReactNode;
+  onCancel?: () => void;
 };
 
-export const LightningTestnetGuard = ({ active, children }: TProps) => {
+export const LightningTestnetGuard = ({ active, children, onCancel }: TProps) => {
   const { isTesting, sessionConfig, updateSessionConfig } = useContext(AppContext);
   const [, navigate] = useLocation();
 
@@ -67,6 +68,10 @@ export const LightningTestnetGuard = ({ active, children }: TProps) => {
   }
 
   const cancel = () => {
+    if (onCancel) {
+      onCancel();
+      return;
+    }
     if (window.history.length > 1) {
       history.back();
     } else {

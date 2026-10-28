@@ -1883,7 +1883,7 @@
       "title": "Receive Lightning"
     },
     "send": {
-      "activationRequired": "Activate Lightning to continue with this payment. Payment details will open automatically after setup.",
+      "activationRequired": "Activate Lightning before paying. After setup, open the payment link again.",
       "confirm": {
         "amount": "Amount",
         "note": "Note",

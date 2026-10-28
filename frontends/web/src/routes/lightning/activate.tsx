@@ -24,11 +24,7 @@ const CONTENT_MIN_HEIGHT = '38em';
 
 type TSteps = 'intro' | 'information' | 'disclaimer' | 'connect' | 'confirm' | 'activating' | 'success';
 
-type TProps = {
-  hasPendingPayment?: boolean;
-};
-
-export const LightningActivate = ({ hasPendingPayment = false }: TProps) => {
+export const LightningActivate = () => {
   const { t } = useTranslation();
   const [, navigate] = useLocation();
   const { lightningAccount } = useLightning();
@@ -91,12 +87,6 @@ export const LightningActivate = ({ hasPendingPayment = false }: TProps) => {
       setStep('activating');
     }
   }, [activationStarted, lightningAccount, step]);
-
-  useEffect(() => {
-    if (step === 'success' && hasPendingPayment) {
-      navigate('/lightning/send', { replace: true });
-    }
-  }, [hasPendingPayment, navigate, step]);
 
   const handleBack = () => {
     switch (step) {

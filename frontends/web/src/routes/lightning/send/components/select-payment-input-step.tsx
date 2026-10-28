@@ -16,7 +16,6 @@ import styles from './select-payment-input-step.module.css';
 
 type TProps = {
   activeAccounts: TAccount[];
-  initialValue?: string;
   inputError?: string;
   onCancel: () => void;
   onSubmit: (input: string) => Promise<boolean>;
@@ -30,7 +29,6 @@ const SCAN_ERROR_TRANSITION_MS = 180;
 
 export const SelectPaymentInputStep = ({
   activeAccounts,
-  initialValue,
   inputError,
   onCancel,
   onSubmit,
@@ -38,8 +36,8 @@ export const SelectPaymentInputStep = ({
 }: TProps) => {
   const { t } = useTranslation();
   const showPasteButton = canReadClipboard();
-  const [manualValue, setManualValue] = useState(initialValue ?? '');
-  const [mode, setMode] = useState<TPaymentInputMode>(initialValue === undefined ? 'initial-scan' : 'input');
+  const [manualValue, setManualValue] = useState('');
+  const [mode, setMode] = useState<TPaymentInputMode>('initial-scan');
   const [inputClosing, setInputClosing] = useState(false);
   const [scanErrorClosing, setScanErrorClosing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
