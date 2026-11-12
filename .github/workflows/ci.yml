@@ -35,10 +35,6 @@ jobs:
         with:
           submodules: recursive
         uses: actions/checkout@v7
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: frontends/web/package.json
       - name: Run CI script
         # The script also runs golang-ci but it's ok: doesn't take too long and may be useful
         # to keep its linter errors in this log, too.
@@ -125,10 +121,6 @@ jobs:
     steps:
       - name: Clone the repo
         uses: actions/checkout@v7
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: frontends/web/package.json
       - name: Enable caching
         uses: actions/cache@v6
         with:
@@ -162,10 +154,6 @@ jobs:
         uses: actions/checkout@v7
         with:
           submodules: recursive
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: frontends/web/package.json
       - name: Build Qt-Linux
         run: ./scripts/github-ci.sh qt-linux
         env:
